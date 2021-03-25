@@ -1,0 +1,856 @@
+---
+title: "dci_quality_measures_analysis"
+author: "Harper Wallace"
+date: "8/1/2020"
+output:
+  html_document: default
+    #df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("/Users/harperwallace/Dropbox/GitHub/howw-dci-quality-measures-2021/")
+
+library(reshape2)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(diagis)
+library(scales)
+library(hash)
+library(multcomp)
+library(car)
+library(userfriendlyscience)
+library(data.table)
+library(nlme)
+source('methods.R')
+
+select <- dplyr::select
+summarize <- dplyr::summarize
+```
+
+#### 0. Read in raw economic data
+
+```{r}
+economic_descriptors_2000_raw <- read.csv("_csv/2000_DCI.csv", header=TRUE)
+economic_descriptors_2017_raw <- read.csv("_csv/2017_DCI.csv", header=TRUE)
+crosswalk_raw <- read.csv("_csv/zip_hsa_crosswalk.csv", header=TRUE)
+```
+
+Select just the ~`Zipcode` and ~`HSA` columns from the crosswalk, and give them better names:
+```{r}
+crosswalk <- crosswalk_raw %>% select(zipcode18, hsanum)
+colnames(crosswalk)[1] <- "Zipcode"
+colnames(crosswalk)[2] <- "HSA"
+```
+
+#### 1. Aggregate economic data from 2000 and 2017 to HSA-level, tidy, compute changes, quintilize by DCI change
+
+Make zip-wise economic data HSA-wise by adding new column `HSA` using `crosswalk` (`left_join` because there are more zip codes in crosswalk than there are in economic_descriptors_...), and clean up the table:
+```{r}
+economic_descriptors_2000_temp <- left_join(economic_descriptors_2000_raw, crosswalk, by="Zipcode")
+
+# reorder columns so "HSA" comes after "Zipcode"
+colorder_2000 <- c("Zipcode","HSA",colnames(economic_descriptors_2000_raw)[-c(1)])
+economic_descriptors_2000_zip_hsa <- economic_descriptors_2000_temp[,colorder_2000]
+
+# repeat for 2017
+economic_descriptors_2017_temp <- left_join(economic_descriptors_2017_raw, crosswalk, by="Zipcode")
+colorder_2017 <- c("Zipcode","HSA",colnames(economic_descriptors_2017_raw)[-c(1)])
+economic_descriptors_2017_zip_hsa <- economic_descriptors_2017_temp[,colorder_2017]
+```
+
+#### 1.a. Aggregate economic data from 2000 and 2017 to HSA-level, tidy, compute changes, quintilize by DCI change
+
+Create new summary data.frame of raw economic data aggregated by `HSA`, weighting appropriate descriptors by population.
+```{r}
+# .groups = 'drop' just suppresses a friendly message
+economic_descriptors_2000 <- economic_descriptors_2000_zip_hsa %>%
+  group_by(HSA) %>%
+  summarise(Total.Pop.2000                                = sum(Total.Population.2000),
+            DCI.2000                                      = weighted.mean(X2000.Distress.Score, Total.Population.2000),
+            .groups = 'drop'
+            )
+
+# repeat for 2017
+economic_descriptors_2017 <- economic_descriptors_2017_zip_hsa %>%
+  group_by(HSA) %>%
+  summarise(Total.Pop.2017                           = sum(Total.Population),
+            DCI.2017                                 = weighted.mean(Distress.Score, Total.Population),
+            .groups = 'drop'
+            )
+```
+
+### 1.b. Read in and tidy raw medicare reimbursements data, using HSA quintile rankings based on DCI changes
+
+```{r}
+reimb_raw <- data.frame()
+
+for (year in 2003:2015)
+{
+  temp_table <- read.csv(paste("_csv/reimb/", year, "_pa_reimb_hsa.csv", sep=""), header=TRUE)
+  
+  colnames(temp_table) <- c("HSA", "HSA.Name", "State", "Enrollees",
+                            "x", "PASR.Total.Reimb.per.E",
+                            "x", "PASR.Hospital.SNF.Reimb.per.E",
+                            "x", "PASR.Physician.Reimb.per.E",
+                            "x", "PASR.Outpatient.Reimb.per.E",
+                            "x", "PASR.Home.Health.Reimb.per.E",
+                            "x", "PASR.Hospice.Reimb.per.E",
+                            "x", "PASR.Durable.Medical.Equipment.Reimb.per.E")
+  
+  # remove 2° header row and "HSA Name" and "State" columns
+  temp_table <- temp_table[-1,-c(2,3)]
+  
+  # remove "x" columns (just placeholders for, to be removed)
+  temp_table <- temp_table[, !grepl("x", colnames(temp_table))]
+  
+  # set all rows except HSA as numeric, minding thousands separators and negatives ("()"), which just indicate uncertainty
+  temp_table[,-1] <- sapply(temp_table[,-1], function(x) as.numeric(gsub("(\\(|,|\\))", "", x)))
+  
+  # years where raw data gives only 20% sample
+  if (year >= 2003 & year < 2010) {
+    temp_table$Enrollees = 5*temp_table$Enrollees
+  }
+  
+  colnames(temp_table) <- c(colnames(temp_table[1]), paste("Reimb.", colnames(temp_table[,-1]), "_", year, sep=""))
+  
+  if (year == 2003) {
+    reimb_raw <- temp_table
+  } else {
+    reimb_raw <- inner_join(reimb_raw, temp_table, by="HSA")
+  }
+}
+```
+
+### 1.c. Read in and tidy raw medicare mortality data, using HSA quintile rankings based on DCI changes
+
+```{r}
+mortality_raw <- data.frame()
+for (year in 2003:2015) {
+  temp_table <- read.csv(paste("_csv/_mortality/", year, "_mortality_hsa.csv", sep=""), header=TRUE)
+  temp_table <- abs(temp_table[c(1,3,4,5)])
+  colnames(temp_table) <- c("HSA", paste("Enrollees.Mortality.", year, sep=""), paste("ASR.Total.Mortality.", year, sep=""), paste("ASR.Non.HMO.Mortality.", year, sep=""))
+  if (year == 2003) {
+    mortality_raw <- temp_table
+  } else {
+    mortality_raw <- inner_join(mortality_raw, temp_table, by="HSA")
+  }
+}
+
+# remove incomplete cases while annual mortalities are still arranged in columns, so each HSA has mortalities for each year 
+mortality_raw <- mortality_raw[complete.cases(mortality_raw),]
+mortality_hsas <- mortality_raw$HSA
+```
+
+```{r}
+medicare_merged <- inner_join(reimb_raw, mortality_raw, by="HSA")
+medicare_merged %>% summarise(n = n())
+```
+
+
+```{r}
+# `inner_join` removes "incomplete cases" (i.e., rows with N/A values), e.g., due to incomplete overlap of HSA data from 2000 to 2017
+dci_change <- economic_descriptors_2000 %>%
+  inner_join(economic_descriptors_2017, by="HSA") %>%
+  inner_join(medicare_merged, by="HSA") %>%
+  mutate(DCI.00.Quintile = cut(DCI.2000, breaks=quantile(DCI.2000, seq(0, 1, 0.2)), labels=c("Lowest", "Lower", "Mid", "Higher", "Highest"))) %>%
+  mutate(DCI.17.Quintile = cut(DCI.2017, breaks=quantile(DCI.2017, seq(0, 1, 0.2)), labels=c("Lowest", "Lower", "Mid", "Higher", "Highest"))) %>%
+  mutate(DCI.Change = factor(ifelse(DCI.00.Quintile == "Lowest",
+                                    ifelse(DCI.17.Quintile == "Lowest", "Lowest > Lowest",
+                                           ifelse(DCI.17.Quintile == "Lower", "Lowest > Low", "Lowest > High")),
+                             ifelse(DCI.00.Quintile == "Highest",
+                                    ifelse(DCI.17.Quintile == "Highest", "Highest > Highest",
+                                           ifelse(DCI.17.Quintile == "Higher", "Highest > High", "Highest > Low")), "OTHER"))))
+
+dci_change <- dci_change %>% select(HSA, DCI.00.Quintile, DCI.17.Quintile, DCI.Change)
+
+# confirm that we have the same number of HSAs as before  >> 3217 (correct)
+dci_change %>% summarise(n = n())
+
+# remove HSAs 43016 and 45008 because they're removed in the other analysis (for weird reasons; cf. notes)
+dci_change <- dci_change[dci_change$HSA != 43016 & dci_change$HSA != 45008,]
+
+# remove remaining "incomplete cases"
+dci_change <- dci_change[complete.cases(dci_change),]
+
+# reorder factor levels for DCI.Change
+dci_change$DCI.Change <- factor(dci_change$DCI.Change, levels=c(paste("Lowest >", c("Lowest", "Low", "High")), paste("Highest >", c("Highest", "High", "Low")), "OTHER"))
+```
+
+### 2. Read in and tidy *raw medicare primary care data*, using HSA quintile rankings based on DCI changes
+
+```{r}
+pc_raw <- data.frame()
+year_names <- c("2003--2007", 2008:2015)
+# year_names <- c("2003--2005", "2006--2007", 2008:2015)
+
+for (year in year_names) {
+  temp_table <- read.csv(paste("_csv/pc_measures/", "PC_HSA_rates_", year, ".csv", sep=""), header=TRUE)
+  
+  if (year == 2015) {
+    colnames(temp_table) <- c("HSA", "HSA.Name",
+                              "N.B.T", "N.B.B", "N.B.W",
+                              "X.Ambulatory.T", "X.Ambulatory.B", "X.Ambulatory.W",
+                              "N.Diabetic.T", "N.Diabetic.B", "N.Diabetic.W",
+                              "X.Ac1.T", "X.Ac1.B", "X.Ac1.W",
+                              "X.Eye.T",  "X.Eye.B", "X.Eye.W",
+                              "X.LDL-C.T", "X.LDL-C.B", "X.LDL-C.W",
+                              "N.Female.67.69.T", "N.Female.67.69.B", "N.Female.67.69.W",
+                              "X.Mammogram.T", "X.Mammogram.B", "X.Mammogram.W",
+                              "N.A.T", "N.A.B", "N.A.W",
+                              "N.per.K.Amputations.T", "N.per.K.Amputations.B", "N.per.K.Amputations.W",
+                              "N.per.K.Ambulatory.Discharges.T", "N.per.K.Ambulatory.Discharges.B", "N.per.K.Ambulatory.Discharges.W")
+  } else {
+    colnames(temp_table) <- c("HSA", "HSA.Name",
+                              "N.B.T", "N.B.B", "N.B.W",
+                              "X.Ambulatory.T", "x", "x",
+                              "X.Ambulatory.B", "x", "x",
+                              "X.Ambulatory.W", "x", "x",
+                              "N.Diabetic.T", "N.Diabetic.B", "N.Diabetic.W",
+                              "X.Ac1.T", "x", "x",
+                              "X.Ac1.B", "x", "x",
+                              "X.Ac1.W", "x", "x",
+                              "X.Eye.T", "x", "x",
+                              "X.Eye.B", "x", "x",
+                              "X.Eye.W", "x", "x",
+                              "X.LDL-C.T", "x", "x",
+                              "X.LDL-C.B", "x", "x",
+                              "X.LDL-C.W", "x", "x",
+                              "N.Female.67.69.T", "N.Female.67.69.B", "N.Female.67.69.W",
+                              "X.Mammogram.T", "x", "x",
+                              "X.Mammogram.B", "x", "x",
+                              "X.Mammogram.W", "x", "x",
+                              "N.A.T", "N.A.B", "N.A.W",
+                              "N.per.K.Amputations.T", "x", "x",
+                              "N.per.K.Amputations.B", "x", "x",
+                              "N.per.K.Amputations.W", "x", "x",
+                              "N.per.K.Ambulatory.Discharges.T", "x", "x",
+                              "N.per.K.Ambulatory.Discharges.B", "x", "x",
+                              "N.per.K.Ambulatory.Discharges.W", "x", "x")
+  }
+  
+  # remove 2° and 3° header rows, and "HSA Name" column
+  temp_table <- temp_table[-c(1,2),-2]
+  
+  # set all rows except HSA and HSA Name as numeric, minding thousands separators and negatives ("()"), which just indicate uncertainty
+  temp_table[,-1] <- sapply(temp_table[,-1], function(x) as.numeric(gsub("(\\(|,|\\))", "", x)))
+  
+  # remove "x" columns (just placeholders for "LB" and "UB" columns, to be removed)
+  temp_table <- temp_table[, !grepl("x", colnames(temp_table))]
+  
+  # correct enrollment figures in years where raw data gives only 20% sample
+  # n.b. in multi-year tables, enrollment figures are clearly the sum across all years -> divide by the number of years to get annual enrollments
+  if (year == "2003--2005") {
+    temp_table$N.B.T = 5/3*temp_table$N.B.T
+    temp_table$N.B.B = 5/3*temp_table$N.B.B
+    temp_table$N.B.W = 5/3*temp_table$N.B.W
+    
+    temp_table$N.A.T = 1/3*temp_table$N.A.T
+    temp_table$N.A.B = 1/3*temp_table$N.A.B
+    temp_table$N.A.W = 1/3*temp_table$N.A.W
+  }
+  else if (year == "2006--2007") {
+    temp_table$N.B.T = 5/2*temp_table$N.B.T
+    temp_table$N.B.B = 5/2*temp_table$N.B.B
+    temp_table$N.B.W = 5/2*temp_table$N.B.W
+    
+    temp_table$N.A.T = 1/2*temp_table$N.A.T
+    temp_table$N.A.B = 1/2*temp_table$N.A.B
+    temp_table$N.A.W = 1/2*temp_table$N.A.W
+  }
+  else if (year == "2003--2007") {
+    temp_table$N.B.T = 5/5*temp_table$N.B.T
+    temp_table$N.B.B = 5/5*temp_table$N.B.B
+    temp_table$N.B.W = 5/5*temp_table$N.B.W
+    
+    temp_table$N.A.T = 1/5*temp_table$N.A.T
+    temp_table$N.A.B = 1/5*temp_table$N.A.B
+    temp_table$N.A.W = 1/5*temp_table$N.A.W
+  }
+  
+  # insert year into column name (excepting HSA column) before merging with other years
+  colnames(temp_table) <- c(colnames(temp_table[1]), paste("PC.", colnames(temp_table[,-1]), "_", year, sep=""))
+  
+  if (year == "2003--2005" | year == "2003--2007") {
+    pc_raw <- temp_table
+  } else {
+    # remove HSAs for which there isn't data for every year
+    pc_raw <- inner_join(pc_raw, temp_table, by="HSA")
+  }
+}
+```
+
+### 4. Read in and tidy *raw medicare discharges data*, using HSA quintile rankings based on DCI changes
+
+```{r}
+med_discharges_raw <- data.frame()
+
+for (year in 2003:2015) {
+  temp_table <- read.csv(paste("_csv/discharges_med/", year, "_med_discharges_hsa.csv", sep=""), header=TRUE)
+  
+  colnames(temp_table) <- c("HSA", "HSA.Name",
+                            "Enrollees", "Total.per.K", "Excl.ACS.per.K", "Ambulatory.Sensitive.per.K", "Convulsions.per.K", "COPD.per.K", "Bacterial.Pneum.per.K", "Asthma.per.K", "Congestive.Heart.Failure.per.K", "Hypertension.per.K", "Angina.per.K", "Cellulitis.per.K", "Diabetes.per.K", "Gastroenterittis.per.K", "Kidney.Urinary.Infection.per.K", "Dehydration.per.K")
+  
+  # remove empty columns (at the end of some files)
+  temp_table <- temp_table[, colSums(temp_table != "" & !is.na(temp_table)) != 0]
+  
+  # remove HSA.Name column
+  temp_table <- temp_table[, -2]
+  
+  # set all rows as numeric, minding thousands separators and negatives ("()"), which just indicate uncertainty
+  temp_table[,-1] <- sapply(temp_table[,-1], function(x) as.numeric(gsub("(\\(|,|\\))", "", x)))
+  
+  # insert year into column name (excepting HSA column) before merging with other years
+  colnames(temp_table) <- c(colnames(temp_table[1]), paste("Med.", colnames(temp_table[,-1]), "_", year, sep=""))
+  
+  if (year == 2003) {
+    med_discharges_raw <- temp_table
+  } else {
+    # remove Hospitals for which there isn't data for every year
+    med_discharges_raw <- inner_join(med_discharges_raw, temp_table, by="HSA")
+  }
+}
+```
+
+### 5. Read in and tidy *raw surgical discharges data*, using HSA quintile rankings based on DCI changes
+
+```{r}
+surg_discharges_raw <- data.frame()
+
+for (year in 2003:2015) {
+  temp_table <- read.csv(paste("_csv/discharges_surg/", year, "_surg_discharges_hsa.csv", sep=""), header=TRUE)
+  
+  colnames(temp_table) <- c("HSA", "HSA.Name",
+                            "Enrollees", "Total.per.K", "Abdominal.Aortic.Aneurysm.Repair.per.K", "Back.Surgery.per.K", "Coronary.Angiography.per.K", "CABG.per.K", "Percutaneous.Coronary.Interventions.per.K", "Carotid.Endarterectomy.per.K", "Cholecysterectomy.per.K", "Hip.Fracture.Hospitalization.per.K", "Hip.Replacement.per.K", "Knee.Replacement.per.K", "Mastectomy.f.Breast.Cancert.per.K.F", "Resection.f.Colon.Cancer.per.K", "Lower.Extremity.Revascularization.per.K", "Transurethral.Prostatectomy.f.Benign.Prostatic.Hyperplasia.per.K.M", "Radical.Prostatectomy.per.K.M", "Aortic.Mitral.Valve.Replacement.per.K")
+  
+  # remove empty columns (at the end of some files)
+  temp_table <- temp_table[, colSums(temp_table != "" & !is.na(temp_table)) != 0]
+  
+  # remove HSA.Name column
+  temp_table <- temp_table[, -2]
+  
+  # set all rows as numeric, minding thousands separators and negatives ("()"), which just indicate uncertainty
+  temp_table[,-1] <- sapply(temp_table[,-1], function(x) as.numeric(gsub("(\\(|,|\\))", "", x)))
+  
+  # insert year into column name (excepting HSA column) before merging with other years
+  colnames(temp_table) <- c(colnames(temp_table[1]), paste("Surg.", colnames(temp_table[,-1]), "_", year, sep=""))
+  
+  if (year == 2003) {
+    surg_discharges_raw <- temp_table
+  } else {
+    # remove Hospitals for which there isn't data for every year
+    surg_discharges_raw <- inner_join(surg_discharges_raw, temp_table, by="HSA")
+  }
+}
+```
+
+Join
+```{r}
+# full_join includes hospitals that, e.g., have primary care data but not eol data
+metrics_merged <- dci_change %>%
+  inner_join(reimb_raw, by="HSA") %>%
+  inner_join(pc_raw, by="HSA") %>%
+  inner_join(med_discharges_raw, by="HSA") %>%
+  inner_join(surg_discharges_raw, by="HSA")
+```
+
+Number of HSAs in each `DCI.Change` group:
+```{r}
+metrics_merged %>%
+  group_by(DCI.Change) %>%
+  summarise(n = n(),
+            .groups = 'drop')
+```
+
+
+
+Spread metrics_merged so that each row corresponds to a given HSA for a given year (rather than each column corresponding to a given measure for a given year)
+```{r}
+metrics_merged_long <- metrics_merged %>%
+  gather(var, val, -c(`HSA`, `DCI.00.Quintile`, `DCI.17.Quintile`, `DCI.Change`)) %>%
+  separate(var, c("var", "Year"), sep="_") %>%
+  spread(var, val)
+```
+
+Read pc_metrics distinguishing 2003--2005 from 2006--2007
+```{r}
+# ### for pc_metrics years 2003--2005 and 2006--2007
+# # removes empty rows for pc metrics that span multiple years, to make graphing easier later
+# non_pc_metrics <- select(metrics_merged_long, !starts_with("PC"))[metrics_merged_long$Year != "2003--2005" & metrics_merged_long$Year != "2006--2007",]
+# non_pc_metrics$Year <- as.numeric(non_pc_metrics$Year)
+# 
+# # removes empty rows for non-pc metrics between 2003 and 2007, which are grouped for pc metrics
+# pc_metrics <- select(metrics_merged_long, HSA, Year, DCI.00.Quintile, DCI.17.Quintile, DCI.Change, starts_with("PC"))[grepl("--", metrics_merged_long$Year, fixed=TRUE) | metrics_merged_long$Year > 2007,]
+# pc_metrics[grepl("2003--2005", pc_metrics$Year),]$Year <- "2004"
+# pc_metrics[grepl("2006--2007", pc_metrics$Year),]$Year <- "2006.5"
+# pc_metrics$Year <- as.numeric(pc_metrics$Year)
+```
+
+Read pc_metrics combining 2003--2007
+```{r}
+### for pc_metrics years 2003--2007
+# removes empty rows for pc metrics that span multiple years, to make graphing easier later
+non_pc_metrics <- select(metrics_merged_long, !starts_with("PC"))[metrics_merged_long$Year != "2003--2007",]
+non_pc_metrics$Year <- as.numeric(non_pc_metrics$Year)
+
+# removes empty rows for non-pc metrics between 2003 and 2007, which are grouped for pc metrics
+pc_metrics <- select(metrics_merged_long, HSA, Year, DCI.00.Quintile, DCI.17.Quintile, DCI.Change, starts_with("PC"))[grepl("--", metrics_merged_long$Year, fixed=TRUE) | metrics_merged_long$Year > 2007,]
+pc_metrics[grepl("2003--2007", pc_metrics$Year),]$Year <- "2005"
+pc_metrics$Year <- as.numeric(pc_metrics$Year)
+```
+
+Determine which metrics have values for all relevant HSAs for all years
+```{r}
+# compute percent of HSAs that have data for each DCI change group (DCI.Change), for each metric (Metric), for each year (Year)
+percent_complete_by_group_by_metric_by_year <- metrics_merged[metrics_merged$DCI.Change != "OTHER",-c(2:3)] %>%
+  gather("Metric", "val", -c(1:2)) %>%
+  separate(Metric, c("Metric", "Year"), sep="_") %>%
+  group_by(DCI.Change, Metric, Year) %>%
+  summarize(Percent.Complete = sum(!is.na(val)) / length(val), .groups = 'drop')
+```
+
+```{r}
+# compute minimum-across-`Year' percent of HSAs that have data for each DCI change group (DCI.Change), for each metric (Metric)
+min_percent_complete_by_group_by_metric <- percent_complete_by_group_by_metric_by_year %>%
+  group_by(DCI.Change, Metric) %>%
+  summarize(Min.Percent.Complete = min(Percent.Complete), .groups = 'drop')
+
+# compute minimum-across-`DCI.Change' AND -across-`Year' percent of HSAs that have data for each for each metric (Metric)
+min_percent_complete_by_metric <- percent_complete_by_group_by_metric_by_year %>%
+  group_by(Metric) %>%
+  summarize(Min.Percent.Complete = min(Percent.Complete), .groups = 'drop')
+
+# e.g.,
+# min_percent_complete_by_group_by_metric[min_percent_complete_by_group_by_metric$Metric == 'Med.Ambulatory.Sensitive.per.K',]
+```
+
+```{r}
+min_percent_complete_by_metric[grepl("^PC.", min_percent_complete_by_metric$Metric) & min_percent_complete_by_metric$Min.Percent.Complete > 0.45,]
+min_percent_complete_by_metric[grepl("^Reimb.", min_percent_complete_by_metric$Metric),]
+
+percent_complete_by_group_by_metric_by_year[percent_complete_by_group_by_metric_by_year$Metric == 'PC.X.Eye.T',]
+```
+
+
+Include only metrics (columns) that have some critical level of data, defined by 'inclusion_criterion'
+Specifically, the data for the metric must be at least as complete as indicated by 'inclusion_criterion' for each DCI.Change group, for each Year
+```{r}
+inclusion_criterion <- 0.45
+cols_majority_complete <- (min_percent_complete_by_metric[min_percent_complete_by_metric$Min.Percent.Complete >= inclusion_criterion,])$Metric
+
+# remove 'Enrollees' and similar columns
+cols_majority_complete <- cols_majority_complete[!grepl("Reimb.Enrollees", cols_majority_complete, fixed = TRUE) &
+                                                   !grepl("Med.Enrollees", cols_majority_complete, fixed = TRUE) &
+                                                   !grepl("PC.N.A", cols_majority_complete, fixed = TRUE) &
+                                                   !grepl("PC.N.B", cols_majority_complete, fixed = TRUE) &
+                                                   !grepl("PC.N.Diabetic", cols_majority_complete, fixed = TRUE) &
+                                                   !grepl("PC.N.Female", cols_majority_complete, fixed = TRUE) &
+                                                   !grepl("Surg.Enrollees", cols_majority_complete, fixed = TRUE)]
+
+# remove race (white)-specific data (no black-specific data for 50% cutoff)
+cols_majority_complete <- cols_majority_complete[!grepl(".W", cols_majority_complete, fixed = TRUE)]
+
+# remove PC.N.per.K.Ambulatory.Discharges.T (identical to Med.Ambulatory.Sensitive.per.K)
+cols_majority_complete <- cols_majority_complete[!grepl("PC.N.per.K.Ambulatory.Discharges.T", cols_majority_complete, fixed = TRUE)]
+
+# remove Med.Excl.ACS.per.K (redundant, since ACS and total are considered)
+cols_majority_complete <- cols_majority_complete[!grepl("Med.Excl.ACS.per.K", cols_majority_complete, fixed = TRUE)]
+
+cols_majority_complete
+
+# e.g.,
+# min_percent_complete_by_group_by_metric[min_percent_complete_by_group_by_metric$Metric %in% cols_majority_complete,]
+```
+
+Manually set plot-drawing parameters
+```{r}
+ordered_columns <- c("Med.Ambulatory.Sensitive.per.K", "Med.Bacterial.Pneum.per.K", "Med.Congestive.Heart.Failure.per.K", "Med.COPD.per.K",
+                     "PC.X.Ambulatory.T", "PC.X.Mammogram.T", "PC.X.Ac1.T", "PC.X.LDL-C.T",
+                     "Surg.Coronary.Angiography.per.K", "Surg.Back.Surgery.per.K", "Surg.Percutaneous.Coronary.Interventions.per.K", "Surg.Knee.Replacement.per.K",
+                     "Reimb.PASR.Total.Reimb.per.E", "Reimb.PASR.Hospital.SNF.Reimb.per.E", "Reimb.PASR.Physician.Reimb.per.E", "Reimb.PASR.Outpatient.Reimb.per.E", "Reimb.PASR.Home.Health.Reimb.per.E", "Reimb.PASR.Hospice.Reimb.per.E")
+
+
+y_lims <- hash()
+y_lims[["Med.Ambulatory.Sensitive.per.K"]] =                      c(0, 140)
+y_lims[["Med.Bacterial.Pneum.per.K"]] =                           c(0, 35)
+y_lims[["Med.Congestive.Heart.Failure.per.K"]] =                  c(0, 40)
+y_lims[["Med.COPD.per.K"]] =                                      c(0, 25)
+y_lims[["Med.Excl.ACS.per.K"]] =                                  c(100, 250)   # new
+y_lims[["Med.Kidney.Urinary.Infection.per.K"]] =                  c(0, 20)      # new
+y_lims[["Med.Total.per.K"]] =                                     c(150, 350)   # new
+
+y_lims[["PC.X.Ambulatory.T"]] =                                   c(65, 85)
+y_lims[["PC.X.Mammogram.T"]] =                                    c(40, 80)
+y_lims[["PC.X.Ac1.T"]] =                                          c(65, 90)
+y_lims[["PC.X.LDL-C.T"]] =                                        c(65, 85)
+y_lims[["PC.N.per.K.Ambulatory.Discharges.T"]] =                  c(55, 85)     # new (ends up being identical to medical discharges)
+y_lims[["PC.X.Eye.T"]] =                                          c(55, 75)     # new
+
+y_lims[["Surg.Coronary.Angiography.per.K"]] =                     c(5, 30)
+y_lims[["Surg.Back.Surgery.per.K"]] =                             c(3, 6)
+y_lims[["Surg.Percutaneous.Coronary.Interventions.per.K"]] =      c(0, 15)
+y_lims[["Surg.Knee.Replacement.per.K"]] =                         c(5, 10)
+y_lims[["Surg.Hip.Fracture.Hospitalization.per.K"]] =             c(5, 10)      # new
+y_lims[["Surg.Total.per.K"]] =                                    c(60, 120)    # new
+
+y_lims[["Reimb.PASR.Total.Reimb.per.E"]] =                        c(6000, 12000)
+y_lims[["Reimb.PASR.Hospital.SNF.Reimb.per.E"]] =                 c(3000, 6000)
+y_lims[["Reimb.PASR.Physician.Reimb.per.E"]] =                    c(1500, 3500)
+y_lims[["Reimb.PASR.Outpatient.Reimb.per.E"]] =                   c(500, 2000)
+y_lims[["Reimb.PASR.Home.Health.Reimb.per.E"]] =                  c(0, 1000)
+y_lims[["Reimb.PASR.Hospice.Reimb.per.E"]] =                      c(0, 500)
+y_lims[["Reimb.PASR.Durable.Medical.Equipment.Reimb.per.E"]] =    c(0, 400)     # new
+
+y_steps <- hash()
+y_steps[["Med.Ambulatory.Sensitive.per.K"]] =                     20
+y_steps[["Med.Bacterial.Pneum.per.K"]] =                          5
+y_steps[["Med.Congestive.Heart.Failure.per.K"]] =                 10
+y_steps[["Med.COPD.per.K"]] =                                     5
+y_steps[["Med.Excl.ACS.per.K"]] =                                 50      # new
+y_steps[["Med.Kidney.Urinary.Infection.per.K"]] =                 5       # new
+y_steps[["Med.Total.per.K"]] =                                    50      # new
+
+y_steps[["PC.X.Ambulatory.T"]] =                                  5
+y_steps[["PC.X.Mammogram.T"]] =                                   10
+y_steps[["PC.X.Ac1.T"]] =                                         5
+y_steps[["PC.X.LDL-C.T"]] =                                       5
+y_steps[["PC.N.per.K.Ambulatory.Discharges.T"]] =                 5       # new (ends up being identical to medical discharges)
+y_steps[["PC.X.Eye.T"]] =                                         5       # new
+
+y_steps[["Surg.Coronary.Angiography.per.K"]] =                    5
+y_steps[["Surg.Back.Surgery.per.K"]] =                            1
+y_steps[["Surg.Percutaneous.Coronary.Interventions.per.K"]] =     5
+y_steps[["Surg.Knee.Replacement.per.K"]] =                        1
+y_steps[["Surg.Hip.Fracture.Hospitalization.per.K"]] =            1       # new
+y_steps[["Surg.Total.per.K"]] =                                   20      # new
+
+y_steps[["Reimb.PASR.Total.Reimb.per.E"]] =                       1000
+y_steps[["Reimb.PASR.Hospital.SNF.Reimb.per.E"]] =                1000
+y_steps[["Reimb.PASR.Physician.Reimb.per.E"]] =                   500
+y_steps[["Reimb.PASR.Outpatient.Reimb.per.E"]] =                  500
+y_steps[["Reimb.PASR.Home.Health.Reimb.per.E"]] =                 200
+y_steps[["Reimb.PASR.Hospice.Reimb.per.E"]] =                     100
+y_steps[["Reimb.PASR.Durable.Medical.Equipment.Reimb.per.E"]] =   100     # new
+
+
+y_names <- hash()
+# PER 1,000 ENROLLEES
+y_names[["Med.Ambulatory.Sensitive.per.K"]] =                     "Ambulatory care sensitive conditions"
+y_names[["Med.Bacterial.Pneum.per.K"]] =                          "Bacterial pneumonia"
+y_names[["Med.Congestive.Heart.Failure.per.K"]] =                 "Congestive heart failure"
+y_names[["Med.COPD.per.K"]] =                                     "COPD"
+y_names[["Med.Excl.ACS.per.K"]] =                                 "Medical discharges excluding ACS events"       # new
+y_names[["Med.Kidney.Urinary.Infection.per.K"]] =                 "Kidney/urinary infection"                      # new
+y_names[["Med.Total.per.K"]] =                                    "Total medical discharges"                      # new
+
+# PERCENT (AMONG RELEVANT GROUP OF ENROLLEES)
+y_names[["PC.X.Ambulatory.T"]] =                                  "At least one ambulatory visit to a PCP"
+y_names[["PC.X.Mammogram.T"]] =                                   "At least one mammogram (of females 67--69)"      ## OVER TWO-YEAR PERIOD
+y_names[["PC.X.Ac1.T"]] =                                         "Hemoglobin A1c test (of diabetics 65--75)"
+y_names[["PC.X.LDL-C.T"]] =                                       "Blood lipids (LDL-C) test (of diabetics 65--75)"
+y_names[["PC.N.per.K.Ambulatory.Discharges.T"]] =                 "Ambulatory care sensitive conditions"            # new (ends up being identical to medical discharges)
+y_names[["PC.X.Eye.T"]] =                                         "Eye exam (of diabetics 65--75)"                  # new
+
+# PER 1,000 ENROLLEES
+y_names[["Surg.Coronary.Angiography.per.K"]] =                    "Coronary angiography"
+y_names[["Surg.Back.Surgery.per.K"]] =                            "Back surgeries"
+y_names[["Surg.Percutaneous.Coronary.Interventions.per.K"]] =     "Percutaneous coronary interventions"
+y_names[["Surg.Knee.Replacement.per.K"]] =                        "Knee replacements"
+y_names[["Surg.Hip.Fracture.Hospitalization.per.K"]] =            "Hospitalization for hip fracture"      # new
+y_names[["Surg.Total.per.K"]] =                                   "Total surgical discharges"             # new
+
+# PER ENROLLEE
+y_names[["Reimb.PASR.Hospital.SNF.Reimb.per.E"]] =                "Hospital and skilled nursing facility (PASR-adj)"
+y_names[["Reimb.PASR.Physician.Reimb.per.E"]] =                   "Physician reimbursements (PASR-adj)"
+y_names[["Reimb.PASR.Outpatient.Reimb.per.E"]] =                  "Outpatient reimbursements (PASR-adj)"
+y_names[["Reimb.PASR.Home.Health.Reimb.per.E"]] =                 "Home health reimbursements (PASR-adj)"
+y_names[["Reimb.PASR.Hospice.Reimb.per.E"]] =                     "Hospice reimbursements (PASR-adj)"
+y_names[["Reimb.PASR.Total.Reimb.per.E"]] =                       "Total (A + B) reimbursements (PASR-adj)"
+y_names[["Reimb.PASR.Durable.Medical.Equipment.Reimb.per.E"]] =   "Durable medical equipment (PASR-adj)"             # new
+```
+
+
+```{r}
+source('methods.R')
+options(scipen = 0)
+
+count_by_dci_change <- function(df) {
+  df %>%
+    group_by(DCI.Change) %>%
+    summarise(n = n() / ifelse(startsWith(col, "PC."), 10, 13),    # divide by number of years (varies, i.e., 2003--2005, 2006--2007) to get number HSAs
+              .groups = 'drop')
+}
+
+pairwise_p_vals <- data.frame()
+gross_p_vals <- data.frame()
+do_plot <- FALSE
+
+for (i in 1:length(cols_majority_complete))
+{
+  col <- cols_majority_complete[i]
+  
+  split_vals <- scan(text=col, sep=".", what="", quiet=TRUE)
+  col_type <- split_vals[1]                      # extract substring to first ".", to distinguish, e.g. PC v. Med
+  is_percent_type <- split_vals[2] == "X"        # extract first "." to second "." to determine whether the value is a percent
+  metrics <- if(col_type == "PC") {  pc_metrics  } else {  non_pc_metrics  }
+  
+  # need to weight selectively, e.g., mammograms by N female rather than all enrollees
+  enrollment_weight <- switch(col_type,
+                              "Reimb" = "Reimb.Enrollees",
+                              "Med" = "Med.Enrollees",
+                              "Surg" = "Surg.Enrollees",
+                              "PC" = switch(col,
+                                            "PC.N.per.K.Ambulatory.Discharges.T" = "PC.N.A.T",
+                                            "PC.X.Ac1.T" = "PC.N.Diabetic.T",
+                                            "PC.X.Ambulatory.T" = "PC.N.A.T",
+                                            "PC.X.Eye.T" = "PC.N.Diabetic.T",
+                                            "PC.X.LDL-C.T" = "PC.N.Diabetic.T",
+                                            "PC.X.Diabetic.65.75" = "PC.N.Diabetic.T",
+                                            "PC.X.Mammogram.T" = "PC.N.Female.67.69.T",
+                                            "PC.X.Female.67.69" = "PC.N.Female.67.69.T",
+                                            "PC.X.Ambulatory.T" = "PC.N.B.T"))
+  
+  subset_1 <- select(metrics[metrics$DCI.Change != "OTHER",], HSA, Year, DCI.Change, enrollment_weight, col)
+  
+  subset_1$DCI.Change <- factor(subset_1$DCI.Change, levels=c(paste("Lowest >", c("Lowest", "Low", "High")), paste("Highest >", c("Highest", "High", "Low"))))
+
+  # remove incomplete cases, which are from HSAs that didn't present a dramatic change in DCI (because columns have already been selected for completeness w/r/t dramatic change HSAs)
+  subset_1 <- subset_1[complete.cases(subset_1),]
+  
+  if(do_plot) {
+    after_removal <- count_by_dci_change(subset_1)
+    n_included <- round(after_removal$n, 0)
+    
+    plot_weighted(subset_1, ylab = y_names[[col]],
+                  legend_title = "",
+                  # legend_values assigned in order of factor levels (defined above)
+                  legend_values = c(paste("n = ", n_included[1], "  ", sep=""),             # started and remained low
+                                    paste("n = ", n_included[2], "  ", sep=""),             # started low, got slightly worse
+                                    paste("n = ", n_included[3], "  ", sep=""),             # started low and got worse
+                                    paste("n = ", n_included[4], "  ", sep=""),             # started and remained high
+                                    paste("n = ", n_included[5], "  ", sep=""),             # started high, got slightly better
+                                    paste("n = ", n_included[6], "  ", sep="")),            # started high and got better
+                  linetype_values = c('solid', 'dashed', 'dotted', 'solid', 'dashed', 'dotted'),
+                  linesize_values = c(0.5, 0.5, 0.5, 1, 1, 1),
+                  y_lims = y_lims[[col]], y_step = y_steps[[col]],
+                  absolute_percent_dollars = ifelse(col_type == "Reimb", 2, ifelse(is_percent_type, 1, 0)),
+                  errors = FALSE) +
+      guides(linesize=guide_legend(nrow=1,byrow=TRUE)) +
+      guides(linetype=guide_legend(nrow=1,byrow=TRUE))
+    
+    height = 5
+    aspect_ratio = 1.4
+    ggsave(paste("_drafts/_figures/metrics/", inclusion_criterion, "_", i, "_", col, ".png", sep=""),
+           height = height, width = height * aspect_ratio, units = "in")
+  }
+
+  
+  # statistical tests
+  print(col)
+  
+  ###
+  # ANOVA
+  p_temp <- anova_by_year(subset_1)
+  p_temp <- rbind(p_temp, t_by_year(subset_1, "Highest > Low", "Lowest > Lowest"))
+  p_temp <- rbind(p_temp, t_by_year(subset_1, "Highest > Low", "Highest > Highest"))
+  p_temp <- rbind(p_temp, t_by_year(subset_1, "Lowest > High", "Lowest > Lowest"))
+  p_temp <- p_temp %>%
+    gather("Year", "p.Uncorrected", -1)
+  
+  # correct only non-ANOVA p-values ## CORRECT ANOVA p-values SEPARATELY
+  p_temp$P.Corrected = 0
+  p_temp[p_temp$Tukey.Pair != "ANOVA",]$P.Corrected <- p.adjust(p_temp[p_temp$Tukey.Pair != "ANOVA",]$p.Uncorrected, method="bonferroni")
+  p_temp[p_temp$Tukey.Pair == "ANOVA",]$P.Corrected <- p.adjust(p_temp[p_temp$Tukey.Pair == "ANOVA",]$p.Uncorrected, method="bonferroni")
+  p_temp <- p_temp[,-3]
+  p_temp$P.Corrected <- as.numeric(p_temp$P.Corrected)
+  colnames(p_temp) <- c("Tukey.Pair", "Year", col)
+  
+  if (i == 1) {
+    pairwise_p_vals <- p_temp
+  } else {
+    pairwise_p_vals <- full_join(pairwise_p_vals, p_temp, by=c("Tukey.Pair", "Year"))
+  }
+}
+
+pairwise_p_vals
+```
+
+Gather pairwise and ANOVA p-values, grouping by Year, Metric
+```{r}
+### set factor level order (reverse-order here, compared to top-down order in plots)
+pairwise_p_vals$Tukey.Pair <- factor(pairwise_p_vals$Tukey.Pair, levels = c("Highest > Low - Lowest > Lowest",    # got better just like started/say good
+                                                                  "Highest > Low - Highest > Highest",  # got better different from started/stayed bad
+                                                                  "Lowest > High - Lowest > Lowest",    # low-distress clustering
+                                                                  "Lowest - Highest (17)",              # fragmentation (17)
+                                                                  "Lowest - Highest (00)",              # fragmentation (00)
+                                                                  "ANOVA"))                             # pairwise comparisons are appropriate
+
+gathered_p_vals <- pairwise_p_vals %>%
+  gather("Metric", "P.Corrected", -c(1:2))
+
+gathered_p_vals[gathered_p_vals$Tukey.Pair == "ANOVA",] %>%
+  group_by(Metric) %>%
+  summarize(Max.P.ANOVA = max(P.Corrected, na.rm = TRUE),
+            ATTN = ifelse(Max.P.ANOVA > 0.05, "*", ""), .groups = 'drop')
+
+gathered_p_vals <- gathered_p_vals %>%
+  mutate(Signif.Code = ifelse(P.Corrected < 0.10, ifelse(P.Corrected < 0.05, ifelse(P.Corrected < 0.01, ifelse(P.Corrected < 0.001, ifelse(P.Corrected < 0.0001, "<.0001", "<.001"), "<.01"), "<.05"), "<.10"), "N.S."))
+
+gathered_p_vals$Signif.Code <- factor(gathered_p_vals$Signif.Code, levels = c("N.S.", "<.10", "<.05", "<.01", "<.001", "<.0001"))
+
+gathered_p_vals
+```
+
+Plot p-values
+```{r}
+save_plot <- FALSE
+
+for (metric_type in c("Med", "PC", "Surg", "Reimb"))
+{
+  metric_p_vals <- gathered_p_vals[grepl(paste("^", metric_type, ".", sep=""), gathered_p_vals$Metric),]
+  metric_p_vals <- metric_p_vals[complete.cases(metric_p_vals),]
+
+  ggplot(metric_p_vals, aes(Year, Tukey.Pair, shape=Signif.Code)) +
+    geom_point(na.rm=TRUE) + 
+    scale_shape_manual(values = c(NA, 1, 4, 8, 13, 16)) +
+    facet_wrap(~Metric, ncol=1)
+  
+  if (save_plot) {
+    height = 5/5 * length(unique(metric_p_vals$Metric)) + 0.05
+    width = 5 * 1.4
+    ggsave(paste("_drafts/_figures/p_vals/", metric_type, ".png", sep=""),
+           height = height, width = width, units = "in")
+  }
+}
+```
+
+```{r}
+# general legend
+plot_weighted(subset_1, ylab = y_names[[col]],
+              legend_title = "",
+              # legend_values assigned in order of factor levels (defined ~ln. 193)
+              legend_values = c("Started and remained prosperous (n = 501) ", "Started prosperous, got slightly worse (127) ", "Started prosperous and got worse (14) ",
+                                "Started and remained unprosperous (n = 481) ", "Started unprosperous, got slightly better (122) ", "Started unprosperous and got better (39) "),
+              linetype_values = c('solid', 'dashed', 'dotted', 'solid', 'dashed', 'dotted'),
+              linesize_values = c(0.5, 0.5, 0.5, 1, 1, 1),
+              y_lims = y_lims[[col]], y_step = y_steps[[col]],
+              absolute_percent_dollars = ifelse(col_type == "Reimb", 2, ifelse(is_percent_type, 1, 0)),
+              errors = FALSE) +
+  guides(linesize=guide_legend(nrow=2,byrow=TRUE)) +
+  guides(linetype=guide_legend(nrow=2,byrow=TRUE))
+  
+height = 8.5
+aspect_ratio = 1.4
+ggsave("/Users/harperwallace/Dropbox/GitHub/howw-dci-quality-measures-2021/_drafts/_figures/general/x_general_legend.png", height = height, width = height * aspect_ratio, units = "in")
+```
+
+
+Lowest > Lowest       501			
+Lowest > Low	        127			
+Lowest > High	        14			
+Highest > Highest	    481			
+Highest > High        122			
+Highest > Low	        39
+
+
+
+### End-of-life metrics not included because hospital-level data cannot be conveniently/reliably aggregated to the HSA level
+### --3. Read in and tidy *raw medicare end-of-life metrics*, using HSA quintile rankings based on DCI changes--
+
+```{r}
+# eol_raw <- data.frame()
+# 
+# for (year in 2003:2015) {
+#   temp_table <- read.csv(paste("_csv/eol_metrics/", "DAP_hospital_", year, ".csv", sep=""), header=TRUE)
+#   
+#   # "x" columns to be removed
+#   if (year <= 2007) {
+#     colnames(temp_table) <- c("HRR", "HRR.Name", "Provider.ID", "Hospital.Name", "City", "State", "System",
+#                               "N.Deaths.Chronically.Ill", "Care.Intensity",
+#                               "Spending.Total", "Spending.Inpatient", "Spending.Outpatient", "Spending.Long-Term", "Spending.Home.Health", "Spending.Hospice", "Spending.Ambulance", "Spending.Durable.Equipment", "Spending.Other",
+#                               "Spending.B.Total", "Spending.B.Evaluation.and.Management", "Spending.B.Procedures", "Spending.B.Imaging", "Spending.B.Tests", "Spending.B.Other",
+#                               "Reimb.per.D", "Days.per.D", "Reimb.per.Day", "Reimb.Ratio.v.Ave", "x", "Days.Ratio.v.Ave", "x", "Reimb.per.Day.Ratio.v.Ave",
+#                               "Payments.for.Physician.Visits.per.D", "Physician.Visits.per.D", "Payments.per.Physician.Visit", "Payments.Ratio.v.Ave", "x", "Visits.Ratio.v.Ave", "x", "Payments.per.Visit.Ratio.v.Ave",
+#                               "Beds", "IC.Beds.Total", "IC.Beds.High-I", "IC.Beds.Interm-I", "Med.and.Surg.Beds", "SNF.Beds", "FTE.Labor.Total", "FTE.Labor.MS", "FTE.Labor.PC", "FTE.Labor.Ratio.MS.v.PC", "RNs.Proposed.Required",
+#                               "Hospital.Days.per.D", "IC.Days.per.D.Total", "IC.Days.per.D.High-I", "IC.Days.per.D.Interm-I", "Med.and.Surg.Days.per.D", "SNF.Days.per.D", "Physician.Visits.per.D.Total", "Physician.Visits.per.D.MS", "Physician.Visits.per.D.PC", "Physician.Visits.per.D.Ratio.MS.v.PC", "Home.Health.Visits.per.D",
+#                               "X.Deaths.in.Hospital", "X.Deaths.incl.ICU", "X.Hospice", "Hospice.Days.per.D", "X.Ten.plus.Physicians", "N.Diff.Physicians.per.D", "Ave.Co-pay.per.D.Total", "Ave.Co-pay.per.D.Physician.Services", "Ave.Co-pay.per.D.Durable.Medical.Equipment")
+#   }
+#   # additional "X.Inpatient.Days.at.Assigned.Hospital" column in years after 2007
+#   else {
+#     ## since deaths occur in 2003, should we shift the years by two years?
+#     
+#     # Table 1. Hospital information (2003)
+#     # Table 2. Medicare spending per decedent by site of care during the last two years of life (deaths occurring 2003)
+#     # Table 3. Medicare Part B spending by type of service (BETOS category) per decedent during the last two years of life (deaths occurring 2003)
+#     # Table 4. The Medical Care Cost Equation: Disaggregation of hospital (facility) reimbursements per decedent into contributions of volume (patient days per decedent) and price (average reimbursements per day in hospital) during the last two years of life (deaths occurring 2003)
+#     # Table 5. The Medical Care Cost Equation: Disaggregation of payments for physician visits per decedent into contributions of volume (physician visits per decedent) and price (average payments per physician visit) during the last two years of life (deaths occurring 2003)
+#     # Table 6. Resource inputs per 1,000 decedents during the last two years of life (deaths occurring 2003)
+#     # Table 7. The patient experience of end-of-life care (deaths occurring 2003)
+#     # Table 7, continued. The patient experience of end-of-life care (deaths occurring 2003)
+#     
+#     colnames(temp_table) <- c("HRR", "HRR.Name", "Provider.ID", "Hospital.Name", "City", "State", "System",
+#                               "N.Deaths.Chronically.Ill", "X.Inpatient.Days.at.Assigned.Hospital", "Care.Intensity",
+#                               "Spending.Total", "Spending.Inpatient", "Spending.Outpatient", "Spending.Long-Term", "Spending.Home.Health", "Spending.Hospice", "Spending.Ambulance", "Spending.Durable.Equipment", "Spending.Other",
+#                               "Spending.B.Total", "Spending.B.Evaluation.and.Management", "Spending.B.Procedures", "Spending.B.Imaging", "Spending.B.Tests", "Spending.B.Other",
+#                               "Reimb.per.D", "Days.per.D", "Reimb.per.Day", "Reimb.Ratio.v.Ave", "x", "Days.Ratio.v.Ave", "x", "Reimb.per.Day.Ratio.v.Ave",
+#                               "Payments.for.Physician.Visits.per.D", "Physician.Visits.per.D", "Payments.per.Physician.Visit", "Payments.Ratio.v.Ave", "x", "Visits.Ratio.v.Ave", "x", "Payments.per.Visit.Ratio.v.Ave",
+#                               "Beds", "IC.Beds.Total", "IC.Beds.High-I", "IC.Beds.Interm-I", "Med.and.Surg.Beds", "SNF.Beds", "FTE.Labor.Total", "FTE.Labor.MS", "FTE.Labor.PC", "FTE.Labor.Ratio.MS.v.PC", "RNs.Proposed.Required",
+#                               "Hospital.Days.per.D", "IC.Days.per.D.Total", "IC.Days.per.D.High-I", "IC.Days.per.D.Interm-I", "Med.and.Surg.Days.per.D", "SNF.Days.per.D", "Physician.Visits.per.D.Total", "Physician.Visits.per.D.MS", "Physician.Visits.per.D.PC", "Physician.Visits.per.D.Ratio.MS.v.PC", "Home.Health.Visits.per.D",
+#                               "X.Deaths.in.Hospital", "X.Deaths.incl.ICU", "X.Hospice", "Hospice.Days.per.D", "X.Ten.plus.Physicians", "N.Diff.Physicians.per.D", "Ave.Co-pay.per.D.Total", "Ave.Co-pay.per.D.Physician.Services", "Ave.Co-pay.per.D.Durable.Medical.Equipment")
+#   }
+#   
+#   # remove empty columns (at the end of some files)
+#   temp_table <- temp_table[, colSums(temp_table != "" & !is.na(temp_table)) != 0]
+#   
+#   # remove HRR, HRR Name, Hospital Name, City, State, and System columns
+#   temp_table <- temp_table[, -c(1:2,4:7)]
+#   
+#   # remove "x" columns (just hold symbols in disaggregation tables)
+#   temp_table <- temp_table[, !grepl("x", colnames(temp_table))]
+#   
+#   # remove 2° and 3° header rows
+#   temp_table <- temp_table[-c(1,2), ]
+#   
+#   # set all rows as numeric, minding thousands separators and negatives ("()"), which just indicate uncertainty
+#   temp_table[,-1] <- sapply(temp_table[,-1], function(x) as.numeric(gsub("(\\(|,|\\))", "", x)))
+#   
+#   # insert year into column name (excepting HSA column) before merging with other years
+#   colnames(temp_table) <- c(colnames(temp_table[1]), paste("EOL.", colnames(temp_table[,-1]), "_", year, sep=""))
+#   
+#   if (year == 2003) {
+#     eol_raw <- temp_table
+#   } else {
+#     # remove Hospitals for which there isn't data for every year
+#     eol_raw <- inner_join(eol_raw, temp_table, by="Provider.ID")
+#   }
+# }
+```
+
+#### No need for Provider.ID to HSA crossover because it's only relevant to EOL metrics
+--Provider.ID to HSA crossover--
+```{r}
+# hospital_HSA_crossover <- read.csv("_csv/eol_metrics/DAP_hospital_HSA_crossover.csv", header=TRUE)
+# 
+# # confirm that Provider.ID values are unique
+# length(unique(hospital_HSA_crossover$Provider.ID)) == nrow(hospital_HSA_crossover)
+# 
+# hospital_HSA_crossover <- hospital_HSA_crossover %>% select(HSA, Provider.ID)
+# 
+# eol_raw <- left_join(hospital_HSA_crossover, eol_raw, by="Provider.ID")
+# 
+# # OPTION 1: remove incomplete hospital-level rows in order to determine average HSA-level values only from complete data (i.e., don't include three hospitals for one value and two for another--only include hospitals that have all values) -- MAY be problematic if, e.g., all three hospitals in an HSA have data in all columns but one, in which case the entire HSA is discarded
+# eol_raw <- eol_raw[complete.cases(eol_raw),]
+# 
+# # how to weight--no hospital-level enrollment data
+# # can't sum--because we're removing incomplete rows, and even so it's uncertain that the hospitals enumerated are exhaustive
+# # eol_row %>%
+# #   group_by(HSA) %>%
+# #   summarise(wtd.PASR.Reimb.per.Enrollee = weighted.mean(PASR.Reimb.per.Enrollee, Enrollees),
+# #             .groups = 'drop') %>%
+# 
+# # OPTION 2: just move forward assuming that the only analysis will be done using data for the ~80 HSAs that demonstrated dramatic change
+# 
+# #View(eol_raw)
+```
