@@ -161,3 +161,11 @@ anova_by_year <- function(df) {
 
   all_p_vals
 }
+
+confidence_interval_around_mean <- function(list, alpha=0.05) {
+  mean = mean(list)
+  n = length(list)
+  s = sd(list)
+  error <- qt(1-alpha/2,df=n-1)*s/sqrt(n)
+  c(mean, error, mean - error, mean + error)
+}

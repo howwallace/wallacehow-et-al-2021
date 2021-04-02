@@ -4,13 +4,14 @@ author: "Harper Wallace"
 date: "8/1/2020"
 output:
   html_document: default
-    #df_print: paged
   pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
+# r version: 4.0.5
+
 knitr::opts_chunk$set(echo = TRUE)
-setwd("/Users/harperwallace/Dropbox/GitHub/howw-dci-quality-measures-2021/")
+knitr::opts_knit$set(root.dir = '/Users/harperwallace/Dropbox/GitHub/howw-dci-quality-measures-2021/')
 
 library(reshape2)
 library(ggplot2)
@@ -356,15 +357,16 @@ metrics_merged <- dci_change %>%
   inner_join(surg_discharges_raw, by="HSA")
 ```
 
-Number of HSAs in each `DCI.Change` group:
+Number of HSAs in each `DCI.Change` group, and total HSAs:
 ```{r}
 metrics_merged %>%
   group_by(DCI.Change) %>%
   summarise(n = n(),
             .groups = 'drop')
+
+metrics_merged %>%
+  summarize(n = n())
 ```
-
-
 
 Spread metrics_merged so that each row corresponds to a given HSA for a given year (rather than each column corresponding to a given measure for a given year)
 ```{r}
@@ -374,7 +376,7 @@ metrics_merged_long <- metrics_merged %>%
   spread(var, val)
 ```
 
-Read pc_metrics distinguishing 2003--2005 from 2006--2007
+Set pc_metrics distinguishing 2003--2005 from 2006--2007
 ```{r}
 # ### for pc_metrics years 2003--2005 and 2006--2007
 # # removes empty rows for pc metrics that span multiple years, to make graphing easier later
@@ -388,7 +390,7 @@ Read pc_metrics distinguishing 2003--2005 from 2006--2007
 # pc_metrics$Year <- as.numeric(pc_metrics$Year)
 ```
 
-Read pc_metrics combining 2003--2007
+Set pc_metrics combining 2003--2007
 ```{r}
 ### for pc_metrics years 2003--2007
 # removes empty rows for pc metrics that span multiple years, to make graphing easier later
@@ -573,7 +575,6 @@ y_names[["Reimb.PASR.Durable.Medical.Equipment.Reimb.per.E"]] =   "Durable medic
 
 
 ```{r}
-source('methods.R')
 options(scipen = 0)
 
 count_by_dci_change <- function(df) {
@@ -753,6 +754,47 @@ Lowest > High	        14
 Highest > Highest	    481			
 Highest > High        122			
 Highest > Low	        39
+
+
+Print HSAs (city, state) that experienced dramatic economic change
+```{r}
+hsas_metrics <- metrics_merged %>% select(HSA, DCI.Change)
+
+crosswalk_temp <- crosswalk_raw %>% select(hsanum, hsacity, hsastate)
+colnames(crosswalk_temp) <- c('HSA', 'City', 'State')
+
+# multiple zip codes belong to the same HSAs; ignore them
+crosswalk_temp <- unique(crosswalk_temp)
+
+town_names <- economic_descriptors_2000 %>%
+  inner_join(economic_descriptors_2017, by="HSA") %>%
+  inner_join(crosswalk_temp, by="HSA") %>%
+  inner_join(hsas_metrics, by="HSA") %>%
+  select(City, State, DCI.Change, Total.Pop.2000, Total.Pop.2017)
+
+town_names <- town_names[complete.cases(town_names),]
+
+high_to_low <- town_names[town_names$DCI.Change == "Highest > Low",]
+high_to_low <- high_to_low %>% select(City, State, Total.Pop.2000, Total.Pop.2017)
+write.table(high_to_low, file = "_drafts/_tables/high_to_low.txt", sep = ",", quote = FALSE, row.names = F)
+
+low_to_high <- town_names[town_names$DCI.Change == "Lowest > High",]
+low_to_high <- low_to_high %>% select(City, State, Total.Pop.2000, Total.Pop.2017)
+write.table(low_to_high, file = "_drafts/_tables/low_to_high.txt", sep = ",", quote = FALSE, row.names = F)
+```
+
+Computing post/pre population ratio
+```{r}
+source('wallacehow-et-al-2021/methods.R')
+high_to_low <- high_to_low %>%
+  mutate(Pop.Ratio = Total.Pop.2017 / Total.Pop.2000)
+confidence_interval_around_mean(high_to_low$Pop.Ratio)
+
+low_to_high <- low_to_high %>%
+  mutate(Pop.Ratio = Total.Pop.2017 / Total.Pop.2000)
+confidence_interval_around_mean(low_to_high$Pop.Ratio)
+print(length(low_to_high$Pop.Ratio))
+```
 
 
 
