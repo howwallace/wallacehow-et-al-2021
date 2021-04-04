@@ -747,7 +747,6 @@ aspect_ratio = 1.4
 ggsave("/Users/harperwallace/Dropbox/GitHub/howw-dci-quality-measures-2021/_drafts/_figures/general/x_general_legend.png", height = height, width = height * aspect_ratio, units = "in")
 ```
 
-
 Lowest > Lowest       501			
 Lowest > Low	        127			
 Lowest > High	        14			
@@ -758,7 +757,8 @@ Highest > Low	        39
 
 Print HSAs (city, state) that experienced dramatic economic change
 ```{r}
-hsas_metrics <- metrics_merged %>% select(HSA, DCI.Change)
+hsas_metrics <- metrics_merged[,c('HSA','DCI.Change','Med.Enrollees_2003','Med.Enrollees_2015')]
+colnames(hsas_metrics) <- c('HSA', 'DCI.Change', 'Enrollees.2000', 'Enrollees.2015')
 
 crosswalk_temp <- crosswalk_raw %>% select(hsanum, hsacity, hsastate)
 colnames(crosswalk_temp) <- c('HSA', 'City', 'State')
@@ -770,16 +770,15 @@ town_names <- economic_descriptors_2000 %>%
   inner_join(economic_descriptors_2017, by="HSA") %>%
   inner_join(crosswalk_temp, by="HSA") %>%
   inner_join(hsas_metrics, by="HSA") %>%
-  select(City, State, DCI.Change, Total.Pop.2000, Total.Pop.2017)
-
-town_names <- town_names[complete.cases(town_names),]
+  select(City, State, DCI.Change, Enrollees.2000, Enrollees.2015)
 
 high_to_low <- town_names[town_names$DCI.Change == "Highest > Low",]
-high_to_low <- high_to_low %>% select(City, State, Total.Pop.2000, Total.Pop.2017)
+high_to_low <- high_to_low %>% select(City, State, Enrollees.2000, Enrollees.2015)
 write.table(high_to_low, file = "_drafts/_tables/high_to_low.txt", sep = ",", quote = FALSE, row.names = F)
+high_to_low
 
 low_to_high <- town_names[town_names$DCI.Change == "Lowest > High",]
-low_to_high <- low_to_high %>% select(City, State, Total.Pop.2000, Total.Pop.2017)
+low_to_high <- low_to_high %>% select(City, State, Enrollees.2000, Enrollees.2015)
 write.table(low_to_high, file = "_drafts/_tables/low_to_high.txt", sep = ",", quote = FALSE, row.names = F)
 ```
 
@@ -787,13 +786,13 @@ Computing post/pre population ratio
 ```{r}
 source('wallacehow-et-al-2021/methods.R')
 high_to_low <- high_to_low %>%
-  mutate(Pop.Ratio = Total.Pop.2017 / Total.Pop.2000)
+  mutate(Pop.Ratio = Enrollees.2015 / Enrollees.2000)
 confidence_interval_around_mean(high_to_low$Pop.Ratio)
+print(length(high_to_low$Pop.Ratio))
 
 low_to_high <- low_to_high %>%
-  mutate(Pop.Ratio = Total.Pop.2017 / Total.Pop.2000)
+  mutate(Pop.Ratio = Enrollees.2015 / Enrollees.2000)
 confidence_interval_around_mean(low_to_high$Pop.Ratio)
-print(length(low_to_high$Pop.Ratio))
 ```
 
 
