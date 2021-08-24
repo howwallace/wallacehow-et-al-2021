@@ -1,6 +1,9 @@
-# wallacehow-et-al-2021
+# wallacehow-et-al-2021b
 This repository contains annotated R scripts used for analysis in:
 
-Title: "Improving economic conditions associated with declining ACSCs, elective surgeries, and care quality but increasing costs"  
-Authors: Harper O. W. Wallace; Kenan Fikri, MS; James N. Weinstein, DO, MS; William B. Weeks, MD, PhD, MBA*  
-(\*Corresponding author)  
+"Improving economic conditions associated with care pattern and cost changes"
+
+Harper O. W. Wallace; Kenan Fikri, MS; James N. Weinstein, DO, MS; William B. Weeks, MD, PhD, MBA*  
+(\*Corresponding author)
+
+https://doi.org/10.22037/sdh.v7i1.35144
